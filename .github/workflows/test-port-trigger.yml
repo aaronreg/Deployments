@@ -1,0 +1,32 @@
+name: Test Port Trigger
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_message:
+        description: 'Test message'
+        required: true
+        type: string
+      port_context:
+        description: 'Port context'
+        required: false
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo test message
+        run: |
+          echo "Test message: ${{ github.event.inputs.test_message }}"
+          echo "Port context: ${{ github.event.inputs.port_context }}"
+      
+      - name: Report success to Port
+        if: always()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(github.event.inputs.port_context).runId }}
+          logMessage: "Workflow completed successfully!"
