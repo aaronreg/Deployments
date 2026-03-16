@@ -110,6 +110,8 @@ jobs:
           if [ -n "${{ github.event.inputs.key_name }}" ]; then
             CMD="$CMD --key-name ${{ inputs.key_name }}"
           fi
+
+          echo "$CMD"
           
           # Execute the command and capture output
           RESULT=$(eval $CMD)
