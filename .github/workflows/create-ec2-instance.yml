@@ -21,7 +21,7 @@ on:
         type: string
       subnet_id:
         description: 'Subnet ID'
-        required: true
+        required: false
         type: string
       security_group_ids:
         description: 'Security Group IDs (JSON array)'
