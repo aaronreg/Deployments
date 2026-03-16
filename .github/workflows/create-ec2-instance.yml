@@ -178,7 +178,7 @@ jobs:
             
           relations: |
             {
-              "account": "${{ fromJson(inputs.aws_account.id).identifier }}"
+              "account": "${{ fromJson(inputs.aws_account).identifier }}"
             }
 
       - name: Inform Port of workflow completion
