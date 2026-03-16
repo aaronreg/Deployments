@@ -173,11 +173,13 @@ jobs:
               "availabilityZone": "${{ steps.create-instance.outputs.availability_zone }}",
               "privateIp": "${{ steps.create-instance.outputs.private_ip }}",
               "publicIp": "${{ steps.get-public-ip.outputs.public_ip }}",
-              "launchTime": "${{ steps.create-instance.outputs.launch_time }}"}
+              "launchTime": "${{ steps.create-instance.outputs.launch_time }}"
+            }
             
           relations: |
             {
-              "account": "${{ inputs.aws_account }}"}
+              "account": "${{ fromJson(inputs.aws_account.id).identifier }}"
+            }
 
       - name: Inform Port of workflow completion
         uses: port-labs/port-github-action@v1
