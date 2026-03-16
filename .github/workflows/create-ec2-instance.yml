@@ -100,9 +100,11 @@ jobs:
           if [ -n "${{ inputs.subnet_id }}" ]; then
             CMD="$CMD --subnet-id ${{ inputs.subnet_id }}"
           fi
+
+          SUBNET_ID="${{ inputs.subnet_id }}"
           
           # Only add security groups if provided
-          if [ -n "${{ inputs.security_group_ids }}" ]; then
+          if [ -n "$SUBNET_ID" ] && [ "$SUBNET_ID" != "null" ] ; then
             CMD="$CMD --security-group-ids ${{ inputs.security_group_ids }}"
           fi
           
