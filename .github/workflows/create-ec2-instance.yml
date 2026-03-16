@@ -23,18 +23,22 @@ on:
         description: 'Subnet ID'
         required: false
         type: string
+        default: ''
       security_group_ids:
         description: 'Security Group IDs (JSON array)'
         required: false
         type: string
+        default: ''
       key_name:
         description: 'Key Pair Name'
         required: false
         type: string
+        default: ''
       aws_account:
         description: 'AWS Account'
         required: false
         type: string
+        default: ''
       port_context:
         description: 'Port context'
         required: true
@@ -85,21 +89,25 @@ jobs:
           echo "  Region: ${{ inputs.region }}"
           echo "  Subnet: ${{ inputs.subnet_id }}"
           
-          # Build the AWS CLI command
+          # Build AWS CLI command dynamically
           CMD="aws ec2 run-instances \
             --image-id ${{ inputs.ami_id }} \
             --instance-type ${{ inputs.instance_type }} \
-            --subnet-id ${{ inputs.subnet_id }} \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.instance_name }}}]' \
             --region ${{ inputs.region }}"
           
-          # Add security groups if provided
-          if [ -n "${{ steps.parse-sg.outputs.security_groups }}" ]; then
-            CMD="$CMD --security-group-ids ${{ steps.parse-sg.outputs.security_groups }}"
+          # Only add subnet if provided
+          if [ -n "${{ inputs.subnet_id }}" ]; then
+            CMD="$CMD --subnet-id ${{ inputs.subnet_id }}"
           fi
           
-          # Add key pair if provided
-          if [ -n "${{ inputs.key_name }}" ]; then
+          # Only add security groups if provided
+          if [ -n "${{ inputs.security_group_ids }}" ]; then
+            CMD="$CMD --security-group-ids ${{ inputs.security_group_ids }}"
+          fi
+          
+          # Only add key name if provided
+          if [ -n "${{ github.event.inputs.key_name }}" ]; then
             CMD="$CMD --key-name ${{ inputs.key_name }}"
           fi
           
