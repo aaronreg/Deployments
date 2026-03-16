@@ -95,21 +95,21 @@ jobs:
             --instance-type ${{ inputs.instance_type }} \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.instance_name }}}]' \
             --region ${{ inputs.region }}"
-          
-          # Only add subnet if provided
-          if [ -n "${{ inputs.subnet_id }}" ]; then
-            CMD="$CMD --subnet-id ${{ inputs.subnet_id }}"
-          fi
 
           SUBNET_ID="${{ inputs.subnet_id }}"
           
-          # Only add security groups if provided
+          # Only add subnet if provided
           if [ -n "$SUBNET_ID" ] && [ "$SUBNET_ID" != "null" ] ; then
+            CMD="$CMD --subnet-id ${{ inputs.subnet_id }}"
+          fi         
+          
+          # Only add security groups if provided
+          if [ -n "${{ inputs.security_group_ids }}" ]; then
             CMD="$CMD --security-group-ids ${{ inputs.security_group_ids }}"
           fi
           
           # Only add key name if provided
-          if [ -n "${{ github.event.inputs.key_name }}" ]; then
+          if [ -n "${{ inputs.key_name }}" ]; then
             CMD="$CMD --key-name ${{ inputs.key_name }}"
           fi
 
