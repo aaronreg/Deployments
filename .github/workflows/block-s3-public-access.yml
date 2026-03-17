@@ -59,13 +59,18 @@ jobs:
         run: |
           echo "📋 Checking current public access block configuration..."
           
-          CURRENT_CONFIG=$(aws s3api get-public-access-block \
-            --bucket ${{ inputs.bucket_name }} \
-            --output json 2>&1 || echo '{"PublicAccessBlockConfiguration":{"BlockPublicAcls":false,"IgnorePublicAcls":false,"BlockPublicPolicy":false,"RestrictPublicBuckets":false}}')
+          # Get current config and handle case where it doesn't exist
+          if aws s3api get-public-access-block --bucket ${{ inputs.bucket_name }} --output json > current_config.json 2>&1; then
+            echo "✅ Retrieved current configuration"
+            cat current_config.json
+          else
+            echo "⚠️ No public access block configuration found (will create new one)"
+            echo '{"PublicAccessBlockConfiguration":{"BlockPublicAcls":false,"IgnorePublicAcls":false,"BlockPublicPolicy":false,"RestrictPublicBuckets":false}}' > current_config.json
+          fi
           
-          echo "Current configuration:"
-          echo "$CURRENT_CONFIG"
-          echo "current_config=$CURRENT_CONFIG" >> $GITHUB_OUTPUT
+          # Store as single-line JSON for GitHub output
+          CURRENT_CONFIG=$(cat current_config.json | jq -c .)
+          echo "current_config=${CURRENT_CONFIG}" >> $GITHUB_OUTPUT
 
       - name: Log Current Configuration
         uses: port-labs/port-github-action@v1
@@ -75,8 +80,7 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: |
-            📋 Current Configuration:
-            ${{ steps.get-current-config.outputs.current_config }}
+            📋 Current Configuration: ${{ steps.get-current-config.outputs.current_config }}
 
       - name: Apply Public Access Block
         id: apply-block
@@ -89,37 +93,41 @@ jobs:
               BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
           
           echo "✅ Public access block applied successfully"
-          echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Verify Configuration
         id: verify
         run: |
           echo "🔍 Verifying new configuration..."
           
-          sleep 2  # Wait for AWS to apply changes
+          sleep 3  # Wait for AWS to apply changes
           
-          NEW_CONFIG=$(aws s3api get-public-access-block \
+          # Get new configuration
+          aws s3api get-public-access-block \
             --bucket ${{ inputs.bucket_name }} \
-            --output json)
+            --output json > new_config.json
           
           echo "New configuration:"
-          echo "$NEW_CONFIG"
+          cat new_config.json
           
           # Parse and verify all settings are true
-          BLOCK_PUBLIC_ACLS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.BlockPublicAcls')
-          IGNORE_PUBLIC_ACLS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.IgnorePublicAcls')
-          BLOCK_PUBLIC_POLICY=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.BlockPublicPolicy')
-          RESTRICT_PUBLIC_BUCKETS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.RestrictPublicBuckets')
+          BLOCK_PUBLIC_ACLS=$(jq -r '.PublicAccessBlockConfiguration.BlockPublicAcls' new_config.json)
+          IGNORE_PUBLIC_ACLS=$(jq -r '.PublicAccessBlockConfiguration.IgnorePublicAcls' new_config.json)
+          BLOCK_PUBLIC_POLICY=$(jq -r '.PublicAccessBlockConfiguration.BlockPublicPolicy' new_config.json)
+          RESTRICT_PUBLIC_BUCKETS=$(jq -r '.PublicAccessBlockConfiguration.RestrictPublicBuckets' new_config.json)
+          
+          echo "Verification results:"
+          echo "  BlockPublicAcls: $BLOCK_PUBLIC_ACLS"
+          echo "  IgnorePublicAcls: $IGNORE_PUBLIC_ACLS"
+          echo "  BlockPublicPolicy: $BLOCK_PUBLIC_POLICY"
+          echo "  RestrictPublicBuckets: $RESTRICT_PUBLIC_BUCKETS"
           
           if [ "$BLOCK_PUBLIC_ACLS" = "true" ] && \
              [ "$IGNORE_PUBLIC_ACLS" = "true" ] && \
              [ "$BLOCK_PUBLIC_POLICY" = "true" ] && \
              [ "$RESTRICT_PUBLIC_BUCKETS" = "true" ]; then
             echo "✅ All public access block settings verified as enabled"
-            echo "verified=true" >> $GITHUB_OUTPUT
           else
             echo "❌ Verification failed - not all settings are enabled"
-            echo "verified=false" >> $GITHUB_OUTPUT
             exit 1
           fi
 
