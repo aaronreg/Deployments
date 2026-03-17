@@ -1,0 +1,196 @@
+name: Block S3 Public Access
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket_name:
+        description: 'S3 Bucket Name'
+        required: true
+        type: string
+      region:
+        description: 'AWS Region'
+        required: true
+        type: string
+      account_id:
+        description: 'AWS Account ID'
+        required: true
+        type: string
+      confirm_remediation:
+        description: 'Confirm Remediation'
+        required: true
+        type: boolean
+      send_notification:
+        description: 'Send Notification'
+        required: false
+        type: boolean
+        default: false
+      port_context:
+        description: 'Port Context'
+        required: true
+        type: string
+
+jobs:
+  block-public-access:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Log Starting
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            🔒 Starting S3 public access block remediation...
+            Bucket: ${{ inputs.bucket_name }}
+            Region: ${{ inputs.region }}
+            Account: ${{ inputs.account_id }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Get Current Public Access Block Configuration
+        id: get-current-config
+        run: |
+          echo "📋 Checking current public access block configuration..."
+          
+          CURRENT_CONFIG=$(aws s3api get-public-access-block \
+            --bucket ${{ inputs.bucket_name }} \
+            --output json 2>&1 || echo '{"PublicAccessBlockConfiguration":{"BlockPublicAcls":false,"IgnorePublicAcls":false,"BlockPublicPolicy":false,"RestrictPublicBuckets":false}}')
+          
+          echo "Current configuration:"
+          echo "$CURRENT_CONFIG"
+          echo "current_config=$CURRENT_CONFIG" >> $GITHUB_OUTPUT
+
+      - name: Log Current Configuration
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            📋 Current Configuration:
+            ${{ steps.get-current-config.outputs.current_config }}
+
+      - name: Apply Public Access Block
+        id: apply-block
+        run: |
+          echo "🔒 Applying public access block settings..."
+          
+          aws s3api put-public-access-block \
+            --bucket ${{ inputs.bucket_name }} \
+            --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          
+          echo "✅ Public access block applied successfully"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Verify Configuration
+        id: verify
+        run: |
+          echo "🔍 Verifying new configuration..."
+          
+          sleep 2  # Wait for AWS to apply changes
+          
+          NEW_CONFIG=$(aws s3api get-public-access-block \
+            --bucket ${{ inputs.bucket_name }} \
+            --output json)
+          
+          echo "New configuration:"
+          echo "$NEW_CONFIG"
+          
+          # Parse and verify all settings are true
+          BLOCK_PUBLIC_ACLS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.BlockPublicAcls')
+          IGNORE_PUBLIC_ACLS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.IgnorePublicAcls')
+          BLOCK_PUBLIC_POLICY=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.BlockPublicPolicy')
+          RESTRICT_PUBLIC_BUCKETS=$(echo $NEW_CONFIG | jq -r '.PublicAccessBlockConfiguration.RestrictPublicBuckets')
+          
+          if [ "$BLOCK_PUBLIC_ACLS" = "true" ] && \
+             [ "$IGNORE_PUBLIC_ACLS" = "true" ] && \
+             [ "$BLOCK_PUBLIC_POLICY" = "true" ] && \
+             [ "$RESTRICT_PUBLIC_BUCKETS" = "true" ]; then
+            echo "✅ All public access block settings verified as enabled"
+            echo "verified=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Verification failed - not all settings are enabled"
+            echo "verified=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Report S3 Bucket to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: UPSERT
+          identifier: ${{ inputs.bucket_name }}
+          blueprint: cloudResource
+          properties: |
+            {
+              "blockPublicAcls": true,
+              "blockPublicPolicy": true,
+              "ignorePublicAcls": true,
+              "restrictPublicBuckets": true,
+              "isPublicAccessBlocked": true
+            }
+
+      - name: Log Success
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            ✅ Successfully blocked public access on S3 bucket: ${{ inputs.bucket_name }}
+            
+            All public access block settings are now enabled:
+            ✅ Block Public ACLs: true
+            ✅ Ignore Public ACLs: true
+            ✅ Block Public Policy: true
+            ✅ Restrict Public Buckets: true
+            
+            The bucket is now compliant with security policies.
+
+      - name: Send Notification (Optional)
+        if: inputs.send_notification == true
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: |
+            📧 Notification: S3 bucket ${{ inputs.bucket_name }} has been secured with public access block settings.
+
+      - name: Update Run Status - Success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: "SUCCESS"
+          logMessage: |
+            🎉 Remediation completed successfully!
+            Bucket ${{ inputs.bucket_name }} is now secure.
+
+      - name: Update Run Status - Failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: "FAILURE"
+          logMessage: |
+            ❌ Remediation failed for bucket ${{ inputs.bucket_name }}
+            Please check the workflow logs for details.
