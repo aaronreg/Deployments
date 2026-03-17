@@ -176,29 +176,3 @@ jobs:
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: |
             📧 Notification: S3 bucket ${{ inputs.bucket_name }} has been secured with public access block settings.
-
-      - name: Update Run Status - Success
-        if: success()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: PATCH_RUN
-          runId: ${{ fromJson(inputs.port_context).runId }}
-          status: "SUCCESS"
-          logMessage: |
-            🎉 Remediation completed successfully!
-            Bucket ${{ inputs.bucket_name }} is now secure.
-
-      - name: Update Run Status - Failure
-        if: failure()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: PATCH_RUN
-          runId: ${{ fromJson(inputs.port_context).runId }}
-          status: "FAILURE"
-          logMessage: |
-            ❌ Remediation failed for bucket ${{ inputs.bucket_name }}
-            Please check the workflow logs for details.
