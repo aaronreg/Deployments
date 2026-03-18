@@ -19,10 +19,6 @@ on:
         description: 'AWS Region'
         required: true
         type: string
-      tags:
-        description: 'EC2 instance tags as JSON'
-        required: True
-        type: string
       subnet_id:
         description: 'Subnet ID'
         required: false
@@ -82,30 +78,6 @@ jobs:
           else
             echo "security_groups=" >> $GITHUB_OUTPUT
           fi
-      - name: Prepare Tags
-        id: prepare_tags
-        run: |
-          # Start with the Name tag
-          NAME_TAG='[{"Key":"Name","Value":"${{ inputs.instance_name }}"}]'
-          
-          # Check if user provided tags (properly handle the input)
-          TAGS_INPUT${{ inputs.tags }}'
-          
-          if [ -n "$TAGS_INPUT" ] && [ "$TAGS_INPUT" != "null" ] && [ "$TAGS_INPUT" != "{}" ]; then
-            echo "User provided tags: $TAGS_INPUT"
-            # Convert user tags from object to AWS tag array format
-            USER_TAGS=$(echo "$TAGS_INPUT" | jq -c 'to_entries | map({"Key": .key, "Value": .value})')
-            # Merge Name tag with user tags
-            ALL_TAGS=$(jq -n --argjson name "$NAME_TAG" --argjson user "$USER_TAGS" '$name + $user')
-          else
-            echo "No user tags provided, using only Name tag"
-            ALL_TAGS="$NAME_TAG"
-          fi
-          
-          echo "Final tags: $ALL_TAGS"
-          # Save to file to preserve formatting
-          echo "$ALL_TAGS" > /tmp/instance-tags.json
-          cat /tmp/instance-tags.json
 
       - name: Create EC2 Instance
         id: create-instance
@@ -116,14 +88,12 @@ jobs:
           echo "  AMI: ${{ inputs.ami_id }}"
           echo "  Region: ${{ inputs.region }}"
           echo "  Subnet: ${{ inputs.subnet_id }}"
-
-          TAGS_JSON=$(cat /tmp/instance-tags.json)
-
+          
           # Build AWS CLI command dynamically
           CMD="aws ec2 run-instances \
             --image-id ${{ inputs.ami_id }} \
             --instance-type ${{ inputs.instance_type }} \
-            --tag-specifications "{\"ResourceType\":\"instance\",\"Tags\":$TAGS_JSON}" \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.instance_name }}}]' \
             --region ${{ inputs.region }}"
 
           SUBNET_ID="${{ inputs.subnet_id }}"
