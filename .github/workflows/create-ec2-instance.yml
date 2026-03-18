@@ -85,22 +85,27 @@ jobs:
       - name: Prepare Tags
         id: prepare_tags
         run: |
-          # Start with the Name tag as a JSON object
-          NAME_TAG='{"Key":"Name","Value":"${{ inputs.instance_name }}"}'
+          # Start with the Name tag
+          NAME_TAG='[{"Key":"Name","Value":"${{ inputs.instance_name }}"}]'
           
-          # Convert user-provided tags from object format to AWS tag array format
-          if [ -n "${{ inputs.tags }}" ] && [ "${{ inputs.tags }}" != "null" ] && [ "${{ inputs.tags }}" != "{}" ]; then
-            echo "User provided tags: ${{ inputs.tags }}"
-            USER_TAGS=$(echo '${{ inputs.tags }}' | jq -c 'to_entries | map({"Key": .key, "Value": .value})')
-            # Combine Name tag with user tags
-            ALL_TAGS=$(echo "[$NAME_TAG]" "$USER_TAGS" | jq -s '.[0] + .[1]')
+          # Check if user provided tags (properly handle the input)
+          TAGS_INPUT${{ inputs.tags }}'
+          
+          if [ -n "$TAGS_INPUT" ] && [ "$TAGS_INPUT" != "null" ] && [ "$TAGS_INPUT" != "{}" ]; then
+            echo "User provided tags: $TAGS_INPUT"
+            # Convert user tags from object to AWS tag array format
+            USER_TAGS=$(echo "$TAGS_INPUT" | jq -c 'to_entries | map({"Key": .key, "Value": .value})')
+            # Merge Name tag with user tags
+            ALL_TAGS=$(jq -n --argjson name "$NAME_TAG" --argjson user "$USER_TAGS" '$name + $user')
           else
             echo "No user tags provided, using only Name tag"
-            ALL_TAGS="[$NAME_TAG]"
+            ALL_TAGS="$NAME_TAG"
           fi
           
-          echo "Final tags JSON: $ALL_TAGS"
-          echo "tags_json=$ALL_TAGS" >> $GITHUB_OUTPUT
+          echo "Final tags: $ALL_TAGS"
+          # Save to file to preserve formatting
+          echo "$ALL_TAGS" > /tmp/instance-tags.json
+          cat /tmp/instance-tags.json
 
       - name: Create EC2 Instance
         id: create-instance
@@ -112,11 +117,13 @@ jobs:
           echo "  Region: ${{ inputs.region }}"
           echo "  Subnet: ${{ inputs.subnet_id }}"
 
+          TAGS_JSON=$(cat /tmp/instance-tags.json)
+
           # Build AWS CLI command dynamically
           CMD="aws ec2 run-instances \
             --image-id ${{ inputs.ami_id }} \
             --instance-type ${{ inputs.instance_type }} \
-            --tag-specifications 'ResourceType=instance,Tags=${{ steps.prepare_tags.outputs.tags_json }}' \
+            --tag-specifications "{\"ResourceType\":\"instance\",\"Tags\":$TAGS_JSON}" \
             --region ${{ inputs.region }}"
 
           SUBNET_ID="${{ inputs.subnet_id }}"
