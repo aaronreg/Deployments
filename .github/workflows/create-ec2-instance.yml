@@ -19,6 +19,10 @@ on:
         description: 'AWS Region'
         required: true
         type: string
+      tags:
+        description: 'EC2 instance tags as JSON'
+        required: True
+        type: string
       subnet_id:
         description: 'Subnet ID'
         required: false
@@ -88,12 +92,23 @@ jobs:
           echo "  AMI: ${{ inputs.ami_id }}"
           echo "  Region: ${{ inputs.region }}"
           echo "  Subnet: ${{ inputs.subnet_id }}"
+
+          # Build tag specification starting with Name tag
+          TAG_SPEC='{Key=Name,Value=${{ inputs.instance_name }}}'
           
+          # Add user-provided tags if they exist
+          if [ -n "${{ inputs.tags }}" ] && [ "${{ inputs.tags }}" != "null" ]; then
+            USER_TAGS=$(echo '${{ inputs.tags }}' | jq -r 'to_entries | map("{Key=\(.key),Value=\(.value)}") | join(",")')
+            TAG_SPEC="$TAG_SPEC,$USER_TAGS"
+          fi
+          
+          echo "Applying tags: $TAG_SPEC"
+
           # Build AWS CLI command dynamically
           CMD="aws ec2 run-instances \
             --image-id ${{ inputs.ami_id }} \
             --instance-type ${{ inputs.instance_type }} \
-            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.instance_name }}}]' \
+            --tag-specifications "ResourceType=instance,Tags=[$TAG_SPEC]" \
             --region ${{ inputs.region }}"
 
           SUBNET_ID="${{ inputs.subnet_id }}"
