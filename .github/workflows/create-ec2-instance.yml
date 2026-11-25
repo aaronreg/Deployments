@@ -42,8 +42,10 @@ jobs:
           [[ "$INSTANCE_NAME" =~ ^[a-z][a-z0-9-]{2,30}$ ]] || { echo "Invalid instance name"; exit 1; }
           [[ "$AMI_ID" =~ ^ami-[0-9a-f]{8,17}$ ]]          || { echo "Invalid AMI id"; exit 1; }
           [[ "$INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
-          [[ "$OWNER" =~ ^[A-Za-z0-9_@.-]+$ ]]             || { echo "Invalid owner"; exit 1; }
+          # Owner comes from Port team picker (e.g. "Backend Team") — allow spaces
+          [[ "$OWNER" =~ ^[A-Za-z0-9_@. -]{1,64}$ ]]       || { echo "Invalid owner"; exit 1; }
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]]        || { echo "Invalid requester"; exit 1; }
+          # Port enums include "Testing"
           [[ "$ENVIRONMENT" =~ ^[A-Za-z]+$ ]]              || { echo "Invalid environment"; exit 1; }
 
       - name: Get Port token and log helper
@@ -60,6 +62,7 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
           cat > /tmp/portlog.sh <<'EOF'
+          # usage: portlog LEVEL "message"   (needs PORT_TOKEN and NODE_RUN_ID in env)
           portlog() {
             curl -sf -X POST "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
               -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' \
