@@ -42,8 +42,9 @@ jobs:
           [[ "$INSTANCE_NAME" =~ ^[a-z][a-z0-9-]{2,30}$ ]] || { echo "Invalid instance name"; exit 1; }
           [[ "$AMI_ID" =~ ^ami-[0-9a-f]{8,17}$ ]]          || { echo "Invalid AMI id"; exit 1; }
           [[ "$INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
-          # Owner comes from Port team picker (e.g. "Backend Team") — allow spaces
-          [[ "$OWNER" =~ ^[A-Za-z0-9_@. -]{1,64}$ ]]       || { echo "Invalid owner"; exit 1; }
+          # Port team titles (e.g. "Backend Team") — use grep; bash [[ =~ ]] char classes are brittle
+          [ "${#OWNER}" -ge 1 ] && [ "${#OWNER}" -le 64 ] || { echo "Invalid owner"; exit 1; }
+          printf '%s' "$OWNER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_ -]*$' || { echo "Invalid owner"; exit 1; }
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]]        || { echo "Invalid requester"; exit 1; }
           # Port enums include "Testing"
           [[ "$ENVIRONMENT" =~ ^[A-Za-z]+$ ]]              || { echo "Invalid environment"; exit 1; }
@@ -146,24 +147,31 @@ jobs:
             -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY"
           portlog INFO "Provisioned $ID. Output reported to Port."
 
-      # Always runs on failure — including failed Validate inputs (port step may not have run).
-      # reportWorkflowStatus eventually syncs from GitHub, but that can lag several minutes.
+      # Failures: close the Port *workflow node run* (wfnr_*), not the legacy action run (PATCH_RUN).
+      # reportWorkflowStatus also closes the node via Ocean/GitHub webhooks, but often after minutes.
       - name: Report failure to Port node run
-        if: failure()
+        if: failure() && inputs.node_run_id != ''
         env:
           PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          NODE_RUN_ID: ${{ inputs.node_run_id }}
         run: |
-          set -euo pipefail
+          set -eu
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          TOKEN=$(curl -sf -X POST https://api.port.io/v1/auth/access_token \
+          API_BASE="https://api.port.io"
+          TOKEN=$(curl -sS -X POST "$API_BASE/v1/auth/access_token" \
             -H 'Content-Type: application/json' \
             -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')" \
-            | jq -r '.accessToken')
-          curl -sf -X POST "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
+            | jq -er '.accessToken')
+          curl -sS -X POST "$API_BASE/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
             -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg url "$RUN_URL" '{logs:[{level:"ERROR",message:("Provisioning failed — see " + $url)}]}')" || true
-          curl -sf -X PATCH "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -d "$(jq -n --arg url "$RUN_URL" '{logs:[{level:"ERROR",message:("GitHub workflow failed — " + $url)}]}')" \
+            || echo "Port log POST failed (non-fatal)"
+          HTTP=$(curl -sS -o /tmp/port-patch-body.txt -w '%{http_code}' -X PATCH \
+            "$API_BASE/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
             -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg url "$RUN_URL" \
-              '{status:"COMPLETED",result:"FAILED",links:[$url],statusLabel:{text:"GitHub workflow failed",variant:"alert"}}')" || true
+            -d "$(jq -n --arg url "$RUN_URL" '{status:"COMPLETED",result:"FAILED",links:[$url]}')")
+          echo "Port node run PATCH HTTP $HTTP"
+          cat /tmp/port-patch-body.txt || true
+          # Do not fail the job again if Port rejects while Ocean still owns the node (409/422).
+          [[ "$HTTP" == "200" || "$HTTP" == "204" ]] || echo "Port status will rely on reportWorkflowStatus"
