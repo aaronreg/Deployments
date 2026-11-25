@@ -146,10 +146,24 @@ jobs:
             -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY"
           portlog INFO "Provisioned $ID. Output reported to Port."
 
-      - name: Log failure
+      # Always runs on failure — including failed Validate inputs (port step may not have run).
+      # reportWorkflowStatus eventually syncs from GitHub, but that can lag several minutes.
+      - name: Report failure to Port node run
         if: failure()
         env:
-          PORT_TOKEN: ${{ steps.port.outputs.token }}
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
-          source /tmp/portlog.sh || exit 0
-          portlog ERROR "Provisioning failed. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          set -euo pipefail
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          TOKEN=$(curl -sf -X POST https://api.port.io/v1/auth/access_token \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')" \
+            | jq -r '.accessToken')
+          curl -sf -X POST "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg url "$RUN_URL" '{logs:[{level:"ERROR",message:("Provisioning failed — see " + $url)}]}')" || true
+          curl -sf -X PATCH "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg url "$RUN_URL" \
+              '{status:"COMPLETED",result:"FAILED",links:[$url],statusLabel:{text:"GitHub workflow failed",variant:"alert"}}')" || true
