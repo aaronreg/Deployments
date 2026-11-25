@@ -3,211 +3,150 @@ name: Create EC2 Instance
 on:
   workflow_dispatch:
     inputs:
-      instance_name:
-        description: 'Instance Name'
-        required: true
-        type: string
-      instance_type:
-        description: 'Instance Type'
-        required: true
-        type: string
-      ami_id:
-        description: 'AMI ID'
-        required: true
-        type: string
-      region:
-        description: 'AWS Region'
-        required: true
-        type: string
-      subnet_id:
-        description: 'Subnet ID'
-        required: false
-        type: string
-        default: ''
-      security_group_ids:
-        description: 'Security Group IDs (JSON array)'
-        required: false
-        type: string
-        default: ''
-      key_name:
-        description: 'Key Pair Name'
-        required: false
-        type: string
-        default: ''
-      aws_account:
-        description: 'AWS Account'
-        required: false
-        type: string
-        default: ''
-      port_context:
-        description: 'Port context'
-        required: true
-        type: string
+      instance_name:      { description: 'Instance name',  required: true,  type: string }
+      instance_type:      { description: 'Instance type',  required: true,  type: string }
+      ami_id:             { description: 'AMI ID',         required: true,  type: string }
+      region:             { description: 'AWS region',     required: true,  type: string }
+      environment:        { description: 'Environment',    required: true,  type: string }
+      owner:              { description: 'Owning team',    required: true,  type: string }
+      requester:          { description: 'Requester email', required: true, type: string }
+      template_version:   { description: 'Template version', required: true, type: string }
+      node_run_id:        { description: 'Port workflow node run id', required: true, type: string }
+      subnet_id:          { description: 'Subnet ID',      required: false, type: string, default: '' }
+      security_group_ids: { description: 'Security group IDs (comma-separated or JSON array)', required: false, type: string, default: '' }
+      key_name:           { description: 'Key pair name',  required: false, type: string, default: '' }
+
+permissions:
+  contents: read
 
 jobs:
   create-ec2-instance:
     runs-on: ubuntu-latest
-    
+    env:
+      INSTANCE_NAME: ${{ inputs.instance_name }}
+      INSTANCE_TYPE: ${{ inputs.instance_type }}
+      AMI_ID: ${{ inputs.ami_id }}
+      AWS_REGION_INPUT: ${{ inputs.region }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      OWNER: ${{ inputs.owner }}
+      REQUESTER: ${{ inputs.requester }}
+      TEMPLATE_VERSION: ${{ inputs.template_version }}
+      NODE_RUN_ID: ${{ inputs.node_run_id }}
+      SUBNET_ID: ${{ inputs.subnet_id }}
+      SECURITY_GROUP_IDS: ${{ inputs.security_group_ids }}
+      KEY_NAME: ${{ inputs.key_name }}
     steps:
-      - name: Inform Port of workflow start
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: PATCH_RUN
-          runId: ${{ fromJson(inputs.port_context).runId }}
-          logMessage: |
-            Starting EC2 instance creation workflow... 🚀
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ "$INSTANCE_NAME" =~ ^[a-z][a-z0-9-]{2,30}$ ]] || { echo "Invalid instance name"; exit 1; }
+          [[ "$AMI_ID" =~ ^ami-[0-9a-f]{8,17}$ ]]          || { echo "Invalid AMI id"; exit 1; }
+          [[ "$INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
+          [[ "$OWNER" =~ ^[A-Za-z0-9_@.-]+$ ]]             || { echo "Invalid owner"; exit 1; }
+          [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]]        || { echo "Invalid requester"; exit 1; }
+          [[ "$ENVIRONMENT" =~ ^[A-Za-z]+$ ]]              || { echo "Invalid environment"; exit 1; }
 
-      - name: Configure AWS Credentials
+      - name: Get Port token and log helper
+        id: port
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sf -X POST https://api.port.io/v1/auth/access_token \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')" \
+            | jq -r '.accessToken')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          cat > /tmp/portlog.sh <<'EOF'
+          portlog() {
+            curl -sf -X POST "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
+              -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' \
+              -d "$(jq -n --arg l "$1" --arg m "$2" '{logs:[{level:$l,message:$m}]}')" >/dev/null || true
+          }
+          EOF
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ inputs.region }}
 
-      - name: Parse Security Groups
-        id: parse-sg
+      - name: Launch instance
+        id: create
+        env:
+          PORT_TOKEN: ${{ steps.port.outputs.token }}
         run: |
-          # Parse security group IDs from JSON array or comma-separated string
-          SG_IDS="${{ inputs.security_group_ids }}"
-          if [ -n "$SG_IDS" ]; then
-            # Remove brackets and quotes, replace commas with spaces
-            SG_FORMATTED=$(echo "$SG_IDS" | tr -d '[]"' | tr ',' ' ')
-            echo "security_groups=$SG_FORMATTED" >> $GITHUB_OUTPUT
-          else
-            echo "security_groups=" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          source /tmp/portlog.sh
+          portlog INFO "Launching $INSTANCE_TYPE in $AWS_REGION_INPUT (template $TEMPLATE_VERSION)"
+
+          args=(ec2 run-instances --count 1 --region "$AWS_REGION_INPUT"
+                --image-id "$AMI_ID" --instance-type "$INSTANCE_TYPE"
+                --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME},{Key=Owner,Value=$OWNER},{Key=Requester,Value=$REQUESTER},{Key=Environment,Value=$ENVIRONMENT},{Key=TemplateVersion,Value=$TEMPLATE_VERSION},{Key=ManagedBy,Value=port}]")
+
+          if [ -n "$SUBNET_ID" ]; then args+=(--subnet-id "$SUBNET_ID"); fi
+          if [ -n "$KEY_NAME" ]; then args+=(--key-name "$KEY_NAME"); fi
+          if [ -n "$SECURITY_GROUP_IDS" ]; then
+            read -r -a sgs <<< "$(echo "$SECURITY_GROUP_IDS" | tr -d '[]"' | tr ',' ' ')"
+            args+=(--security-group-ids "${sgs[@]}")
           fi
 
-      - name: Create EC2 Instance
-        id: create-instance
+          RESULT=$(aws "${args[@]}")
+          echo "instance_id=$(echo "$RESULT" | jq -r '.Instances[0].InstanceId')" >> "$GITHUB_OUTPUT"
+          portlog INFO "Instance created, waiting for running state"
+
+      - name: Wait until running
         run: |
-          echo "Creating EC2 instance with the following configuration:"
-          echo "  Name: ${{ inputs.instance_name }}"
-          echo "  Type: ${{ inputs.instance_type }}"
-          echo "  AMI: ${{ inputs.ami_id }}"
-          echo "  Region: ${{ inputs.region }}"
-          echo "  Subnet: ${{ inputs.subnet_id }}"
-          
-          # Build AWS CLI command dynamically
-          CMD="aws ec2 run-instances \
-            --image-id ${{ inputs.ami_id }} \
-            --instance-type ${{ inputs.instance_type }} \
-            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.instance_name }}}]' \
-            --region ${{ inputs.region }}"
+          aws ec2 wait instance-running --region "$AWS_REGION_INPUT" \
+            --instance-ids "${{ steps.create.outputs.instance_id }}"
 
-          SUBNET_ID="${{ inputs.subnet_id }}"
-          
-          # Only add subnet if provided
-          if [ -n "$SUBNET_ID" ] && [ "$SUBNET_ID" != "null" ] ; then
-            CMD="$CMD --subnet-id ${{ inputs.subnet_id }}"
-          fi         
-          
-          # Only add security groups if provided
-          if [ -n "${{ inputs.security_group_ids }}" ]; then
-            CMD="$CMD --security-group-ids ${{ inputs.security_group_ids }}"
-          fi
-          
-          # Only add key name if provided
-          if [ -n "${{ inputs.key_name }}" ]; then
-            CMD="$CMD --key-name ${{ inputs.key_name }}"
-          fi
-
-          echo "$CMD"
-          
-          # Execute the command and capture output
-          RESULT=$(eval $CMD)
-          
-          # Extract instance details
-          INSTANCE_ID=$(echo $RESULT | jq -r '.Instances[0].InstanceId')
-          INSTANCE_TYPE=$(echo $RESULT | jq -r '.Instances[0].InstanceType')
-          AVAILABILITY_ZONE=$(echo $RESULT | jq -r '.Instances[0].Placement.AvailabilityZone')
-          PRIVATE_IP=$(echo $RESULT | jq -r '.Instances[0].PrivateIpAddress // "N/A"')
-          LAUNCH_TIME=$(echo $RESULT | jq -r '.Instances[0].LaunchTime')
-          STATE=$(echo $RESULT | jq -r '.Instances[0].State.Name')
-          
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "instance_type=$INSTANCE_TYPE" >> $GITHUB_OUTPUT
-          echo "availability_zone=$AVAILABILITY_ZONE" >> $GITHUB_OUTPUT
-          echo "private_ip=$PRIVATE_IP" >> $GITHUB_OUTPUT
-          echo "launch_time=$LAUNCH_TIME" >> $GITHUB_OUTPUT
-          echo "state=$STATE" >> $GITHUB_OUTPUT
-          
-          echo "✅ EC2 Instance created successfully!"
-          echo "Instance ID: $INSTANCE_ID"
-
-      - name: Wait for instance to be running
+      - name: Describe instance
+        id: describe
         run: |
-          echo "Waiting for instance to reach running state..."
-          aws ec2 wait instance-running \
-            --instance-ids ${{ steps.create-instance.outputs.instance_id }} \
-            --region ${{ inputs.region }}
-          
-          echo "✅ Instance is now running!"
+          set -euo pipefail
+          D=$(aws ec2 describe-instances --region "$AWS_REGION_INPUT" \
+                --instance-ids "${{ steps.create.outputs.instance_id }}" \
+                --query 'Reservations[0].Instances[0]')
+          {
+            echo "private_ip=$(echo "$D" | jq -r '.PrivateIpAddress // ""')"
+            echo "public_ip=$(echo "$D"  | jq -r '.PublicIpAddress // ""')"
+            echo "az=$(echo "$D"         | jq -r '.Placement.AvailabilityZone')"
+            echo "launch_time=$(echo "$D"| jq -r '.LaunchTime')"
+            echo "state=$(echo "$D"      | jq -r '.State.Name')"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Get Public IP
-        id: get-public-ip
+      - name: Report output to Port node run
+        env:
+          PORT_TOKEN: ${{ steps.port.outputs.token }}
         run: |
-          # Get the public IP address once instance is running
-          PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ steps.create-instance.outputs.instance_id }} \
-            --region ${{ inputs.region }} \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
-            --output text)
-          
-          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          echo "Public IP: $PUBLIC_IP"
+          set -euo pipefail
+          source /tmp/portlog.sh
+          ID="${{ steps.create.outputs.instance_id }}"
+          BODY=$(jq -n \
+            --arg instanceId "$ID" \
+            --arg instanceType "$INSTANCE_TYPE" \
+            --arg privateIp "${{ steps.describe.outputs.private_ip }}" \
+            --arg publicIp "${{ steps.describe.outputs.public_ip }}" \
+            --arg availabilityZone "${{ steps.describe.outputs.az }}" \
+            --arg launchTime "${{ steps.describe.outputs.launch_time }}" \
+            --arg state "${{ steps.describe.outputs.state }}" \
+            --arg region "$AWS_REGION_INPUT" \
+            --arg amiId "$AMI_ID" \
+            --arg templateVersion "$TEMPLATE_VERSION" \
+            --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg consoleUrl "https://$AWS_REGION_INPUT.console.aws.amazon.com/ec2/home?region=$AWS_REGION_INPUT#InstanceDetails:instanceId=$ID" \
+            '{output:{instanceId:$instanceId,instanceType:$instanceType,privateIp:$privateIp,publicIp:$publicIp,availabilityZone:$availabilityZone,launchTime:$launchTime,state:$state,region:$region,amiId:$amiId,templateVersion:$templateVersion,runUrl:$runUrl,consoleUrl:$consoleUrl},links:[$consoleUrl]}')
+          curl -sf -X PATCH "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY"
+          portlog INFO "Provisioned $ID. Output reported to Port."
 
-      - name: Report EC2 Instance to Port
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: UPSERT
-          identifier: ${{ steps.create-instance.outputs.instance_id }}
-          blueprint: ec2Instance
-          properties: |
-            {
-              "instanceType": "${{ steps.create-instance.outputs.instance_type }}",
-              "state": "running",
-              "availabilityZone": "${{ steps.create-instance.outputs.availability_zone }}",
-              "privateIp": "${{ steps.create-instance.outputs.private_ip }}",
-              "publicIp": "${{ steps.get-public-ip.outputs.public_ip }}",
-              "launchTime": "${{ steps.create-instance.outputs.launch_time }}"
-            }
-            
-          relations: |
-            {
-              "account": "${{ fromJson(inputs.aws_account).identifier }}"
-            }
-
-      - name: Inform Port of workflow completion
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: PATCH_RUN
-          runId: ${{ fromJson(inputs.port_context).runId }}
-          logMessage: |
-            ✅ EC2 Instance created successfully!
-            
-            Instance Details:
-            - Instance ID: ${{ steps.create-instance.outputs.instance_id }}
-            - Instance Type: ${{ steps.create-instance.outputs.instance_type }}
-            - Availability Zone: ${{ steps.create-instance.outputs.availability_zone }}
-            - Private IP: ${{ steps.create-instance.outputs.private_ip }}
-            - Public IP: ${{ steps.get-public-ip.outputs.public_ip }}
-            - State: running
-            
-            View in Port: https://app.getport.io/ec2InstanceEntity?identifier=${{ steps.create-instance.outputs.instance_id }}
-
-      - name: Handle workflow failure
+      - name: Log failure
         if: failure()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          operation: PATCH_RUN
-          runId: ${{ fromJson(inputs.port_context).runId }}
-          logMessage: |
-            ❌ EC2 Instance creation failed. Please check the workflow logs for details.
+        env:
+          PORT_TOKEN: ${{ steps.port.outputs.token }}
+        run: |
+          source /tmp/portlog.sh || exit 0
+          portlog ERROR "Provisioning failed. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
