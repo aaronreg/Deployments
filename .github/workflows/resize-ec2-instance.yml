@@ -1,0 +1,155 @@
+name: Resize EC2 Instance
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:        { description: 'EC2 instance ID', required: true, type: string }
+      region:             { description: 'AWS region', required: true, type: string }
+      new_instance_type:  { description: 'Target instance type', required: true, type: string }
+      requester:          { description: 'Requester email', required: true, type: string }
+      reason:             { description: 'Change reason', required: true, type: string }
+      is_exception:       { description: 'Exception request (true/false)', required: true, type: string }
+      node_run_id:        { description: 'Port workflow node run id', required: true, type: string }
+
+permissions:
+  contents: read
+
+jobs:
+  resize-ec2-instance:
+    runs-on: ubuntu-latest
+    env:
+      PORT_API_BASE: ${{ vars.PORT_API_BASE || 'https://api.port.io' }}
+      INSTANCE_ID: ${{ inputs.instance_id }}
+      AWS_REGION_INPUT: ${{ inputs.region }}
+      NEW_INSTANCE_TYPE: ${{ inputs.new_instance_type }}
+      REQUESTER: ${{ inputs.requester }}
+      REASON: ${{ inputs.reason }}
+      IS_EXCEPTION: ${{ inputs.is_exception }}
+      NODE_RUN_ID: ${{ inputs.node_run_id }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "Invalid instance id"; exit 1; }
+          [[ "$AWS_REGION_INPUT" =~ ^[a-z]{2}-[a-z]+-[0-9]$ ]] || { echo "Invalid region"; exit 1; }
+          [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]] || { echo "Invalid requester"; exit 1; }
+          [[ "${#REASON}" -ge 3 ]] || { echo "Invalid reason"; exit 1; }
+          if [[ "$IS_EXCEPTION" == "true" ]]; then
+            [[ "$NEW_INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Exception resize still limited to t3.*"; exit 1; }
+          else
+            [[ "$NEW_INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
+          fi
+
+      - name: Get Port token and log helper
+        id: port
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          AUTH_BODY=$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')
+          AUTH_HTTP=$(curl -sS -o /tmp/port-auth.json -w '%{http_code}' -X POST \
+            "${PORT_API_BASE}/v1/auth/access_token" \
+            -H 'Content-Type: application/json' -d "$AUTH_BODY")
+          [ "$AUTH_HTTP" = "200" ] || { echo "::error::Port auth HTTP $AUTH_HTTP"; cat /tmp/port-auth.json; exit 1; }
+          TOKEN=$(jq -er '.accessToken' /tmp/port-auth.json)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          cat > /tmp/portlog.sh <<EOF
+          portlog() {
+            curl -sf -X POST "${PORT_API_BASE}/v1/workflows/nodes/runs/\${NODE_RUN_ID}/logs" \
+              -H "Authorization: Bearer \${PORT_TOKEN}" -H 'Content-Type: application/json' \
+              -d "\$(jq -n --arg l "\$1" --arg m "\$2" '{logs:[{level:\$l,message:\$m}]}')" >/dev/null || true
+          }
+          EOF
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Resize instance
+        id: resize
+        env:
+          PORT_TOKEN: ${{ steps.port.outputs.token }}
+        run: |
+          set -euo pipefail
+          source /tmp/portlog.sh
+          portlog INFO "Reading $INSTANCE_ID in $AWS_REGION_INPUT"
+          CUR=$(aws ec2 describe-instances --region "$AWS_REGION_INPUT" \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0]')
+          PREV_TYPE=$(echo "$CUR" | jq -r '.InstanceType')
+          PREV_STATE=$(echo "$CUR" | jq -r '.State.Name')
+          echo "previous_type=$PREV_TYPE" >> "$GITHUB_OUTPUT"
+          echo "state=$PREV_STATE" >> "$GITHUB_OUTPUT"
+          if [ "$PREV_TYPE" = "$NEW_INSTANCE_TYPE" ]; then
+            portlog INFO "Already $NEW_INSTANCE_TYPE — no-op"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "new_type=$PREV_TYPE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          WAS_RUNNING=false
+          if [ "$PREV_STATE" = "running" ]; then WAS_RUNNING=true; fi
+          if [ "$WAS_RUNNING" = true ]; then
+            portlog WARN "Stopping instance for resize (brief downtime)"
+            aws ec2 stop-instances --region "$AWS_REGION_INPUT" --instance-ids "$INSTANCE_ID"
+            aws ec2 wait instance-stopped --region "$AWS_REGION_INPUT" --instance-ids "$INSTANCE_ID"
+          fi
+          portlog INFO "Changing type $PREV_TYPE → $NEW_INSTANCE_TYPE"
+          aws ec2 modify-instance-attribute --region "$AWS_REGION_INPUT" \
+            --instance-id "$INSTANCE_ID" --instance-type "{\"Value\": \"$NEW_INSTANCE_TYPE\"}"
+          if [ "$WAS_RUNNING" = true ]; then
+            portlog INFO "Starting instance after resize"
+            aws ec2 start-instances --region "$AWS_REGION_INPUT" --instance-ids "$INSTANCE_ID"
+            aws ec2 wait instance-running --region "$AWS_REGION_INPUT" --instance-ids "$INSTANCE_ID"
+            FINAL_STATE=running
+          else
+            FINAL_STATE=stopped
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_type=$NEW_INSTANCE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "state=$FINAL_STATE" >> "$GITHUB_OUTPUT"
+          portlog INFO "Resize complete"
+
+      - name: Report output to Port node run
+        env:
+          PORT_TOKEN: ${{ steps.port.outputs.token }}
+        run: |
+          set -euo pipefail
+          source /tmp/portlog.sh
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          BODY=$(jq -n \
+            --arg prev "${{ steps.resize.outputs.previous_type }}" \
+            --arg new "${{ steps.resize.outputs.new_type }}" \
+            --arg state "${{ steps.resize.outputs.state }}" \
+            --arg changed "${{ steps.resize.outputs.changed }}" \
+            --arg runUrl "$RUN_URL" \
+            '{status:"COMPLETED",result:"SUCCESS",output:{previousType:$prev,newType:$new,state:$state,changed:($changed=="true"),runUrl:$runUrl},links:[$runUrl]}')
+          HTTP=$(curl -sS -o /tmp/port-success-patch.txt -w '%{http_code}' -X PATCH \
+            "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY")
+          echo "Port node run PATCH HTTP $HTTP"
+          [[ "$HTTP" == "200" || "$HTTP" == "204" ]] || { echo "::error::Port PATCH failed"; exit 1; }
+          portlog INFO "Resize reported to Port"
+
+      - name: Report failure to Port node run
+        if: failure() && inputs.node_run_id != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          NODE_RUN_ID: ${{ inputs.node_run_id }}
+        run: |
+          set -u
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          AUTH_HTTP=$(curl -sS -o /tmp/port-auth-fail.json -w '%{http_code}' -X POST \
+            "${PORT_API_BASE}/v1/auth/access_token" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')")
+          [ "$AUTH_HTTP" = "200" ] || exit 0
+          TOKEN=$(jq -r '.accessToken' /tmp/port-auth-fail.json)
+          curl -sS -X PATCH "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg url "$RUN_URL" '{status:"COMPLETED",result:"FAILED",links:[$url]}')" || true
