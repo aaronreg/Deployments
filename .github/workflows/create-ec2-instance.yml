@@ -23,6 +23,8 @@ jobs:
   create-ec2-instance:
     runs-on: ubuntu-latest
     env:
+      # EU: https://api.port.io — US: https://api.us.port.io (optional repo variable PORT_API_BASE)
+      PORT_API_BASE: ${{ vars.PORT_API_BASE || 'https://api.port.io' }}
       INSTANCE_NAME: ${{ inputs.instance_name }}
       INSTANCE_TYPE: ${{ inputs.instance_type }}
       AMI_ID: ${{ inputs.ami_id }}
@@ -56,18 +58,28 @@ jobs:
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          TOKEN=$(curl -sf -X POST https://api.port.io/v1/auth/access_token \
-            -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')" \
-            | jq -r '.accessToken')
+          if [ -z "${PORT_CLIENT_ID}" ] || [ -z "${PORT_CLIENT_SECRET}" ]; then
+            echo "::error::PORT_CLIENT_ID / PORT_CLIENT_SECRET are empty — set org credentials from Port → Credentials → Organization"
+            exit 1
+          fi
+          AUTH_BODY=$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')
+          AUTH_HTTP=$(curl -sS -o /tmp/port-auth.json -w '%{http_code}' -X POST \
+            "${PORT_API_BASE}/v1/auth/access_token" \
+            -H 'Content-Type: application/json' -d "$AUTH_BODY")
+          if [ "$AUTH_HTTP" != "200" ]; then
+            echo "::error::Port auth HTTP ${AUTH_HTTP} at ${PORT_API_BASE} — fix Deployments secrets (Osaka org CLIENT_ID/SECRET) or set PORT_API_BASE repo variable"
+            cat /tmp/port-auth.json || true
+            exit 1
+          fi
+          TOKEN=$(jq -er '.accessToken' /tmp/port-auth.json)
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          cat > /tmp/portlog.sh <<'EOF'
+          cat > /tmp/portlog.sh <<EOF
           # usage: portlog LEVEL "message"   (needs PORT_TOKEN and NODE_RUN_ID in env)
           portlog() {
-            curl -sf -X POST "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
-              -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' \
-              -d "$(jq -n --arg l "$1" --arg m "$2" '{logs:[{level:$l,message:$m}]}')" >/dev/null || true
+            curl -sf -X POST "${PORT_API_BASE}/v1/workflows/nodes/runs/\${NODE_RUN_ID}/logs" \
+              -H "Authorization: Bearer \${PORT_TOKEN}" -H 'Content-Type: application/json' \
+              -d "\$(jq -n --arg l "\$1" --arg m "\$2" '{logs:[{level:\$l,message:\$m}]}')" >/dev/null || true
           }
           EOF
 
@@ -143,7 +155,7 @@ jobs:
             --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --arg consoleUrl "https://$AWS_REGION_INPUT.console.aws.amazon.com/ec2/home?region=$AWS_REGION_INPUT#InstanceDetails:instanceId=$ID" \
             '{output:{instanceId:$instanceId,instanceType:$instanceType,privateIp:$privateIp,publicIp:$publicIp,availabilityZone:$availabilityZone,launchTime:$launchTime,state:$state,region:$region,amiId:$amiId,templateVersion:$templateVersion,runUrl:$runUrl,consoleUrl:$consoleUrl},links:[$consoleUrl]}')
-          curl -sf -X PATCH "https://api.port.io/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+          curl -sf -X PATCH "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
             -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY"
           portlog INFO "Provisioned $ID. Output reported to Port."
 
@@ -156,19 +168,32 @@ jobs:
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
           NODE_RUN_ID: ${{ inputs.node_run_id }}
         run: |
-          set -eu
+          set -u
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          API_BASE="https://api.port.io"
-          TOKEN=$(curl -sS -X POST "$API_BASE/v1/auth/access_token" \
+          if [ -z "${PORT_CLIENT_ID:-}" ] || [ -z "${PORT_CLIENT_SECRET:-}" ]; then
+            echo "Port secrets missing — relying on reportWorkflowStatus"
+            exit 0
+          fi
+          AUTH_HTTP=$(curl -sS -o /tmp/port-auth-fail.json -w '%{http_code}' -X POST \
+            "${PORT_API_BASE}/v1/auth/access_token" \
             -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')" \
-            | jq -er '.accessToken')
-          curl -sS -X POST "$API_BASE/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
+            -d "$(jq -n --arg i "$PORT_CLIENT_ID" --arg s "$PORT_CLIENT_SECRET" '{clientId:$i,clientSecret:$s}')")
+          if [ "$AUTH_HTTP" != "200" ]; then
+            echo "Port auth HTTP ${AUTH_HTTP} at ${PORT_API_BASE} — cannot PATCH node run"
+            cat /tmp/port-auth-fail.json || true
+            exit 0
+          fi
+          TOKEN=$(jq -r '.accessToken' /tmp/port-auth-fail.json)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Port auth response missing accessToken"
+            exit 0
+          fi
+          curl -sS -X POST "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}/logs" \
             -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
             -d "$(jq -n --arg url "$RUN_URL" '{logs:[{level:"ERROR",message:("GitHub workflow failed — " + $url)}]}')" \
             || echo "Port log POST failed (non-fatal)"
           HTTP=$(curl -sS -o /tmp/port-patch-body.txt -w '%{http_code}' -X PATCH \
-            "$API_BASE/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
             -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
             -d "$(jq -n --arg url "$RUN_URL" '{status:"COMPLETED",result:"FAILED",links:[$url]}')")
           echo "Port node run PATCH HTTP $HTTP"
