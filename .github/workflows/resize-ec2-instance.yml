@@ -28,10 +28,15 @@ jobs:
       NODE_RUN_ID: ${{ inputs.node_run_id }}
     steps:
       - name: Validate inputs
+        id: validate
         run: |
           set -euo pipefail
-          [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "Invalid instance id"; exit 1; }
-          [[ "$AWS_REGION_INPUT" =~ ^[a-z]{2}-[a-z]+-[0-9]$ ]] || { echo "Invalid region"; exit 1; }
+          [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "Invalid instance id: '$INSTANCE_ID'"; exit 1; }
+          REGION=$(echo "${AWS_REGION_INPUT:-eu-west-1}" | tr '[:upper:]' '[:lower:]' | xargs)
+          [[ -n "$REGION" && "$REGION" != "null" ]] || { echo "Invalid region (empty): '$AWS_REGION_INPUT'"; exit 1; }
+          [[ "$REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]] || { echo "Invalid region: '$AWS_REGION_INPUT' (normalized: '$REGION')"; exit 1; }
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "AWS_REGION_INPUT=$REGION" >> "$GITHUB_ENV"
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]] || { echo "Invalid requester"; exit 1; }
           [[ "${#REASON}" -ge 3 ]] || { echo "Invalid reason"; exit 1; }
           if [[ "$IS_EXCEPTION" == "true" ]]; then
@@ -68,7 +73,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ inputs.region }}
+          aws-region: ${{ steps.validate.outputs.region }}
 
       - name: Resize instance
         id: resize
