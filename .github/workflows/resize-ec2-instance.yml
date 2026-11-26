@@ -32,7 +32,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "Invalid instance id: '$INSTANCE_ID'"; exit 1; }
-          REGION=$(echo "${AWS_REGION_INPUT:-eu-west-1}" | tr '[:upper:]' '[:lower:]' | xargs)
+          if [[ -z "$AWS_REGION_INPUT" || "$AWS_REGION_INPUT" == "null" ]]; then
+            AWS_REGION_INPUT="eu-west-1"
+          fi
+          REGION=$(echo "$AWS_REGION_INPUT" | tr '[:upper:]' '[:lower:]' | xargs)
           [[ -n "$REGION" && "$REGION" != "null" ]] || { echo "Invalid region (empty): '$AWS_REGION_INPUT'"; exit 1; }
           [[ "$REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]] || { echo "Invalid region: '$AWS_REGION_INPUT' (normalized: '$REGION')"; exit 1; }
           echo "region=$REGION" >> "$GITHUB_OUTPUT"
