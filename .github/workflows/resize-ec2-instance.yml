@@ -35,7 +35,7 @@ jobs:
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]] || { echo "Invalid requester"; exit 1; }
           [[ "${#REASON}" -ge 3 ]] || { echo "Invalid reason"; exit 1; }
           if [[ "$IS_EXCEPTION" == "true" ]]; then
-            [[ "$NEW_INSTANCE_TYPE" == "m5.2xlarge" ]] || { echo "Exception resize only permits m5.2xlarge"; exit 1; }
+            [[ "$NEW_INSTANCE_TYPE" == "m5.2xlarge" || "$NEW_INSTANCE_TYPE" == "r6i.xlarge" ]] || { echo "Exception resize only permits m5.2xlarge or r6i.xlarge"; exit 1; }
           else
             [[ "$NEW_INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
           fi
