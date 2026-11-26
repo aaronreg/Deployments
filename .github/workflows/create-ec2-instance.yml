@@ -154,9 +154,13 @@ jobs:
             --arg templateVersion "$TEMPLATE_VERSION" \
             --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --arg consoleUrl "https://$AWS_REGION_INPUT.console.aws.amazon.com/ec2/home?region=$AWS_REGION_INPUT#InstanceDetails:instanceId=$ID" \
-            '{output:{instanceId:$instanceId,instanceType:$instanceType,privateIp:$privateIp,publicIp:$publicIp,availabilityZone:$availabilityZone,launchTime:$launchTime,state:$state,region:$region,amiId:$amiId,templateVersion:$templateVersion,runUrl:$runUrl,consoleUrl:$consoleUrl},links:[$consoleUrl]}')
-          curl -sf -X PATCH "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
-            -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY"
+            '{status:"COMPLETED",result:"SUCCESS",output:{instanceId:$instanceId,instanceType:$instanceType,privateIp:$privateIp,publicIp:$publicIp,availabilityZone:$availabilityZone,launchTime:$launchTime,state:$state,region:$region,amiId:$amiId,templateVersion:$templateVersion,runUrl:$runUrl,consoleUrl:$consoleUrl},links:[$consoleUrl]}')
+          HTTP=$(curl -sS -o /tmp/port-success-patch.txt -w '%{http_code}' -X PATCH \
+            "${PORT_API_BASE}/v1/workflows/nodes/runs/${NODE_RUN_ID}" \
+            -H "Authorization: Bearer ${PORT_TOKEN}" -H 'Content-Type: application/json' -d "$BODY")
+          echo "Port node run PATCH HTTP $HTTP"
+          cat /tmp/port-success-patch.txt || true
+          [[ "$HTTP" == "200" || "$HTTP" == "204" ]] || { echo "::error::Port node run not closed (HTTP $HTTP)"; exit 1; }
           portlog INFO "Provisioned $ID. Output reported to Port."
 
       # Failures: close the Port *workflow node run* (wfnr_*), not the legacy action run (PATCH_RUN).
