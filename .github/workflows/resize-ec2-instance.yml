@@ -42,10 +42,21 @@ jobs:
           echo "AWS_REGION_INPUT=$REGION" >> "$GITHUB_ENV"
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]] || { echo "Invalid requester"; exit 1; }
           [[ "${#REASON}" -ge 3 ]] || { echo "Invalid reason"; exit 1; }
+          TYPE=$(echo "$NEW_INSTANCE_TYPE" | tr '[:upper:]' '[:lower:]' | xargs)
+          if [[ "$TYPE" == "null" || -z "$TYPE" || ! "$TYPE" =~ ^[a-z][0-9]?\.[a-z0-9.]+$ ]]; then
+            EXTRACTED=$(echo "$NEW_INSTANCE_TYPE" | grep -oiE 't3\.(micro|small|medium)|m5\.2xlarge|r6i\.xlarge' | head -1 | tr '[:upper:]' '[:lower:]' || true)
+            TYPE="${EXTRACTED:-}"
+          fi
+          if [[ -z "$TYPE" ]]; then
+            echo "Invalid instance type (empty or garbled): '$NEW_INSTANCE_TYPE'"
+            exit 1
+          fi
+          echo "new_instance_type=$TYPE" >> "$GITHUB_OUTPUT"
+          echo "NEW_INSTANCE_TYPE=$TYPE" >> "$GITHUB_ENV"
           if [[ "$IS_EXCEPTION" == "true" ]]; then
-            [[ "$NEW_INSTANCE_TYPE" == "m5.2xlarge" || "$NEW_INSTANCE_TYPE" == "r6i.xlarge" ]] || { echo "Exception resize only permits m5.2xlarge or r6i.xlarge"; exit 1; }
+            [[ "$TYPE" == "m5.2xlarge" || "$TYPE" == "r6i.xlarge" ]] || { echo "Exception resize only permits m5.2xlarge or r6i.xlarge (got '$TYPE')"; exit 1; }
           else
-            [[ "$NEW_INSTANCE_TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted"; exit 1; }
+            [[ "$TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted: '$TYPE'"; exit 1; }
           fi
 
       - name: Get Port token and log helper
