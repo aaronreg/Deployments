@@ -5,10 +5,11 @@ on:
     inputs:
       instance_id:        { description: 'EC2 instance ID', required: true, type: string }
       region:             { description: 'AWS region', required: true, type: string }
-      new_instance_type:  { description: 'Target instance type', required: true, type: string }
+      new_instance_type:  { description: 'Target size from form (or Other for exception)', required: true, type: string }
+      exception_target_type: { description: 'Exception target when new_instance_type is Other', required: false, type: string, default: '' }
       requester:          { description: 'Requester email', required: true, type: string }
       reason:             { description: 'Change reason', required: true, type: string }
-      is_exception:       { description: 'Exception request (true/false)', required: true, type: string }
+      is_exception:       { description: 'Deprecated — exception inferred from new_instance_type', required: false, type: string, default: '' }
       node_run_id:        { description: 'Port workflow node run id', required: true, type: string }
 
 permissions:
@@ -22,9 +23,9 @@ jobs:
       INSTANCE_ID: ${{ inputs.instance_id }}
       AWS_REGION_INPUT: ${{ inputs.region }}
       NEW_INSTANCE_TYPE: ${{ inputs.new_instance_type }}
+      EXCEPTION_TARGET_TYPE: ${{ inputs.exception_target_type }}
       REQUESTER: ${{ inputs.requester }}
       REASON: ${{ inputs.reason }}
-      IS_EXCEPTION: ${{ inputs.is_exception }}
       NODE_RUN_ID: ${{ inputs.node_run_id }}
     steps:
       - name: Validate inputs
@@ -34,7 +35,7 @@ jobs:
           [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "Invalid instance id: '$INSTANCE_ID'"; exit 1; }
           REGION=$(echo "$AWS_REGION_INPUT" | tr '[:upper:]' '[:lower:]' | xargs)
           if [[ "$REGION" == "null" || -z "$REGION" || ! "$REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]]; then
-            EXTRACTED=$(echo "$REGION" | grep -oE '[a-z]{2}-[a-z]+-[0-9]+' | head -1 || true)
+            EXTRACTED=$(echo "$AWS_REGION_INPUT" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z]{2}-[a-z]+-[0-9]+' | head -1 || true)
             REGION="${EXTRACTED:-eu-west-1}"
           fi
           [[ "$REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]] || { echo "Invalid region: '$AWS_REGION_INPUT'"; exit 1; }
@@ -42,22 +43,25 @@ jobs:
           echo "AWS_REGION_INPUT=$REGION" >> "$GITHUB_ENV"
           [[ "$REQUESTER" =~ ^[A-Za-z0-9_.@+-]+$ ]] || { echo "Invalid requester"; exit 1; }
           [[ "${#REASON}" -ge 3 ]] || { echo "Invalid reason"; exit 1; }
-          TYPE=$(echo "$NEW_INSTANCE_TYPE" | tr '[:upper:]' '[:lower:]' | xargs)
-          if [[ "$TYPE" == "null" || -z "$TYPE" || ! "$TYPE" =~ ^[a-z][0-9]?\.[a-z0-9.]+$ ]]; then
-            EXTRACTED=$(echo "$NEW_INSTANCE_TYPE" | grep -oiE 't3\.(micro|small|medium)|m5\.2xlarge|r6i\.xlarge' | head -1 | tr '[:upper:]' '[:lower:]' || true)
-            TYPE="${EXTRACTED:-}"
+          REQUESTED=$(echo "$NEW_INSTANCE_TYPE" | xargs)
+          IS_EX=false
+          if [[ "$REQUESTED" == "Other (exception request)" ]]; then
+            IS_EX=true
           fi
-          if [[ -z "$TYPE" ]]; then
-            echo "Invalid instance type (empty or garbled): '$NEW_INSTANCE_TYPE'"
-            exit 1
+          if [[ "$IS_EX" == true ]]; then
+            TYPE=$(echo "${EXCEPTION_TARGET_TYPE:-}" | tr '[:upper:]' '[:lower:]' | xargs)
+            [[ "$TYPE" == "m5.2xlarge" || "$TYPE" == "r6i.xlarge" ]] || { echo "Exception resize requires m5.2xlarge or r6i.xlarge (got '${EXCEPTION_TARGET_TYPE:-}')"; exit 1; }
+          else
+            TYPE=$(echo "$REQUESTED" | tr '[:upper:]' '[:lower:]' | xargs)
+            if [[ "$TYPE" == "null" || -z "$TYPE" || ! "$TYPE" =~ ^[a-z][0-9]?\.[a-z0-9.]+$ ]]; then
+              EXTRACTED=$(echo "$REQUESTED" | grep -oiE 't3\.(micro|small|medium)|m5\.2xlarge|r6i\.xlarge' | head -1 | tr '[:upper:]' '[:lower:]' || true)
+              TYPE="${EXTRACTED:-}"
+            fi
+            [[ -n "$TYPE" ]] || { echo "Invalid instance type (empty or garbled): '$NEW_INSTANCE_TYPE'"; exit 1; }
+            [[ "$TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted: '$TYPE'"; exit 1; }
           fi
           echo "new_instance_type=$TYPE" >> "$GITHUB_OUTPUT"
           echo "NEW_INSTANCE_TYPE=$TYPE" >> "$GITHUB_ENV"
-          if [[ "$IS_EXCEPTION" == "true" ]]; then
-            [[ "$TYPE" == "m5.2xlarge" || "$TYPE" == "r6i.xlarge" ]] || { echo "Exception resize only permits m5.2xlarge or r6i.xlarge (got '$TYPE')"; exit 1; }
-          else
-            [[ "$TYPE" =~ ^t3\.(micro|small|medium)$ ]] || { echo "Instance type not permitted: '$TYPE'"; exit 1; }
-          fi
 
       - name: Get Port token and log helper
         id: port
